@@ -24,6 +24,10 @@ def parse_args():
     p.add_argument("--out", type=Path, default=Path("outputs"))
     p.add_argument("--folds", type=int, default=5)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--q-low", type=float, default=0.001,
+                   help="drop rows below this quantile of any trait")
+    p.add_argument("--q-high", type=float, default=0.98,
+                   help="drop rows above this quantile of any trait")
     return p.parse_args()
 
 
@@ -57,6 +61,14 @@ def main():
     if (~keep).sum():
         print(f"Dropping {(~keep).sum()} rows with non-positive targets")
     train = train[keep].reset_index(drop=True)
+
+    # Drop extreme outliers: rows outside [q_low, q_high] for any trait.
+    lo = train[target_cols].quantile(args.q_low)
+    hi = train[target_cols].quantile(args.q_high)
+    inside = ((train[target_cols] >= lo) & (train[target_cols] <= hi)).all(axis=1)
+    print(f"Outlier filter [{args.q_low}, {args.q_high}]: "
+          f"keeping {inside.sum()} of {len(train)} rows")
+    train = train[inside].reset_index(drop=True)
     X = train[features].to_numpy(dtype=np.float32)
     X_test = test[features].to_numpy(dtype=np.float32)
     Y = np.log10(train[target_cols].to_numpy())
@@ -75,14 +87,16 @@ def main():
             model.fit(X[tr], Y[tr, j])
             oof[va, j] = model.predict(X[va])
             test_pred[:, j] += model.predict(X_test) / args.folds
-        # Score in original units, matching the competition metric.
+        # Raw-unit R2 matches the competition metric; log R2 is less outlier-sensitive.
         r2 = r2_score(10 ** Y[:, j], 10 ** oof[:, j])
-        print(f"{trait:>6}  CV R2 = {r2:.4f}")
+        r2_log = r2_score(Y[:, j], oof[:, j])
+        print(f"{trait:>6}  CV R2 = {r2:.4f}   (log-scale R2 = {r2_log:.4f})")
 
     mean_r2 = np.mean([
         r2_score(10 ** Y[:, j], 10 ** oof[:, j]) for j in range(len(traits))
     ])
-    print(f"Mean CV R2 = {mean_r2:.4f}")
+    mean_r2_log = np.mean([r2_score(Y[:, j], oof[:, j]) for j in range(len(traits))])
+    print(f"Mean CV R2 = {mean_r2:.4f}   (log-scale {mean_r2_log:.4f})")
 
     out = pd.DataFrame(10 ** test_pred, columns=traits)
     out.insert(0, "id", test["id"].values)
